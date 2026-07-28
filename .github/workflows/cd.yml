@@ -19,9 +19,19 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk libgl1-mesa-glx xvfb
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
       - name: Run Final Validation Tests
         run: |
-          python -m unittest discover -s tests -v
+          xvfb-run python -m unittest discover -s tests -v
 
       - name: Build Release Package Bundle
         run: |
