@@ -1,0 +1,35 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environment
+env/
+venv/
+ENV/
+.venv/
+
+# Database files
+database/*.db
+*.db
+
+# Logs and temp
+logs/*.log
+temp/*
+!temp/.gitkeep
+
+# Storage / User generated files
+storage/exports/*
+storage/reports/*
+storage/students/face_dataset/*
+storage/students/id_cards/*
+storage/students/student_images/*
+storage/faculty/faculty_images/*
+!storage/exports/.gitkeep
+!storage/reports/.gitkeep
+
+# IDE files
+.vscode/
+.idea/
