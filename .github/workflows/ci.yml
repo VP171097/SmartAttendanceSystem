@@ -1,0 +1,70 @@
+name: CI / CD Pipeline
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+jobs:
+  code-quality-and-syntax:
+    name: Code Quality & Syntax Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate Python Syntax Compilation
+        run: |
+          python -m compileall -q .
+
+  unit-tests:
+    name: Run Unit Tests
+    runs-on: ubuntu-latest
+    needs: code-quality-and-syntax
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run Unittest Suite
+        run: |
+          python -m unittest discover -s tests -v
+
+  schema-and-seed-verification:
+    name: Database Schema & Seed Verification
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test Database Initialization & Schema
+        run: |
+          python -c "
+          from core.database import Database
+          from pathlib import Path
+          import tempfile
+
+          with tempfile.TemporaryDirectory() as tmp:
+              db = Database(db_path=Path(tmp) / 'ci_test.db')
+              db.initialise_schema()
+              print('CI Schema initialized successfully!')
+          "
