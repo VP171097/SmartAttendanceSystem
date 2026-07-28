@@ -38,10 +38,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install System Dependencies (GUI & OpenCV Headless Support)
+      - name: Install System Dependencies (GUI & Headless Support)
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-tk libgl1-mesa-glx xvfb
+          sudo apt-get install -y python3-tk libgl1 libglib2.0-0 xvfb
 
       - name: Install Python Dependencies
         run: |
