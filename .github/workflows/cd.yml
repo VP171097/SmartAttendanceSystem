@@ -1,0 +1,49 @@
+name: Continuous Deployment (CD) & Release
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy-and-release:
+    name: Build & Create Release Artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run Final Validation Tests
+        run: |
+          python -m unittest discover -s tests -v
+
+      - name: Build Release Package Bundle
+        run: |
+          mkdir -p release_dist
+          zip -r release_dist/SmartAttendanceSystem-Release.zip . -x "*.git*" "temp/*" "logs/*" "*.pyc" "__pycache__/*" "storage/exports/*" "storage/reports/*"
+
+      - name: Create Automatic Release Tag
+        id: create_tag
+        run: |
+          TAG_NAME="v1.0.$(date +'%Y%m%d%H%M%S')"
+          echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "Generated Release Tag: $TAG_NAME"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.create_tag.outputs.tag }}
+          name: Smart Attendance System Release ${{ steps.create_tag.outputs.tag }}
+          body: |
+            ## Automated Release Deployment
+            - Verified against full test suite.
+            - Ready for deployment on main branch.
+          files: release_dist/SmartAttendanceSystem-Release.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
