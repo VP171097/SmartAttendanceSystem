@@ -1,0 +1,48 @@
+name: Dev-to-Main Promotion Gatekeeper
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [ opened, synchronize, reopened ]
+
+jobs:
+  main-release-gate:
+    name: Production Release Gatekeeper Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk libgl1 libglib2.0-0 xvfb
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate Source Branch
+        run: |
+          echo "Pull Request target branch: ${{ github.base_ref }}"
+          echo "Pull Request source branch: ${{ github.head_ref }}"
+
+      - name: Run Full Test Suite
+        run: |
+          xvfb-run python -m unittest discover -s tests -v
+
+      - name: Verify Core Imports
+        run: |
+          python -c "
+          import importlib
+          for mod in ['config.settings', 'core.database', 'core.validators', 'models.student', 'services.report_service']:
+              importlib.import_module(mod)
+          print('All gatekeeper imports verified successfully!')
+          "
