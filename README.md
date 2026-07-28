@@ -26,14 +26,6 @@ data automatically. Nothing else needs configuring.
 
 ---
 
-## Sign-in credentials
-
-| Role | Username | Password |
-|---|---|---|
-| Administrator | `admin` | `admin123` |
-| Faculty | `fac001` … `fac013` | `faculty123` |
-| Student | `dcse25001`, `dee25001`, `dfd25001`, … | `student123` |
-
 > **Student usernames are the enrollment number in lower case.** The enrollment
 > format is `D` + branch code + 2-digit admission year + serial — so a Computer
 > Science student is `dcse25001`, an Electronics student is `dee25001` and a
