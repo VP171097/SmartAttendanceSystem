@@ -359,6 +359,14 @@ def approve_request(request_id: int, remarks: str = "",
     if request["status"] != STATUS_PENDING:
         return False, f"This request has already been {request['status'].lower()}."
 
+    # The verification queue already filters to a faculty's own subjects, but
+    # that is a UI convenience, not the security boundary -- a request built
+    # by hand against someone else's request_id must still be refused here.
+    if (user or {}).get("role") == "Faculty" \
+            and request["faculty_id"] != (user or {}).get("linked_id"):
+        return False, ("You are not the faculty for this subject, so you "
+                       "cannot verify this attendance request.")
+
     att_session_id = request["att_session_id"]
 
     # ---- make sure a session exists ------------------------------------
@@ -461,6 +469,11 @@ def reject_request(request_id: int, remarks: str,
         return False, "Request not found."
     if request["status"] != STATUS_PENDING:
         return False, f"This request has already been {request['status'].lower()}."
+
+    if (user or {}).get("role") == "Faculty" \
+            and request["faculty_id"] != (user or {}).get("linked_id"):
+        return False, ("You are not the faculty for this subject, so you "
+                       "cannot verify this attendance request.")
 
     db.update("self_attendance_requests", {
         "status": STATUS_REJECTED,

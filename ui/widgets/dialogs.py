@@ -304,12 +304,17 @@ class FormField:
                  default=None, placeholder: str = "", width: int = 260,
                  validator: Callable | None = None, hint: str = "",
                  file_types: list | None = None, readonly: bool = False,
-                 span: int = 1):
+                 span: int = 1, on_capture: Callable | None = None):
         """
         Args:
             kind: text | password | number | textarea | select | date |
-                  checkbox | file | image | readonly
+                  checkbox | file | image | photo | readonly
             validator: ``value -> (ok, message)``.
+            on_capture: for kind="photo" only.  Called with no arguments when
+                the user presses "Capture"; must return a file path (or None
+                if the user cancelled).  Keeps this module unaware of camera
+                specifics -- the caller supplies whatever capture dialog it
+                needs.
         """
         self.key = key
         self.label = label
@@ -324,6 +329,7 @@ class FormField:
         self.file_types = file_types
         self.readonly = readonly
         self.span = span
+        self.on_capture = on_capture
 
         self.variable: tk.Variable | None = None
         self.widget = None
@@ -489,7 +495,7 @@ class FormDialog(BaseDialog):
             widget.pack(anchor="w", pady=(4, 0))
             field.widget = widget
 
-        elif kind in ("file", "image"):
+        elif kind in ("file", "image", "photo"):
             field.variable = tk.StringVar(value=str(value) if value else "")
             row = ctk.CTkFrame(parent, fg_color="transparent")
             row.pack(fill="x")
@@ -498,8 +504,17 @@ class FormDialog(BaseDialog):
                                  corner_radius=7, font=FONTS["small"],
                                  placeholder_text="No file selected")
             entry.pack(side="left", fill="x", expand=True)
-            ctk.CTkButton(row, text="Browse", width=88, height=34, corner_radius=7,
-                          font=FONTS["small_bold"],
+
+            if kind == "photo" and field.on_capture:
+                ctk.CTkButton(row, text="Capture", width=84, height=34, corner_radius=7,
+                              font=FONTS["small_bold"], fg_color=color("primary"),
+                              command=lambda f=field: self._capture(f)
+                              ).pack(side="left", padx=(8, 0))
+
+            ctk.CTkButton(row, text="Browse", width=80, height=34, corner_radius=7,
+                          font=FONTS["small_bold"], fg_color="transparent",
+                          border_width=1, border_color=color("border"),
+                          text_color=color("text"), hover_color=color("surface_alt"),
                           command=lambda f=field: self._browse(f)).pack(side="left", padx=(8, 0))
             field.widget = entry
 
@@ -513,7 +528,7 @@ class FormDialog(BaseDialog):
                                          wraplength=field.width * 2)
 
     def _browse(self, field: FormField) -> None:
-        if field.kind == "image":
+        if field.kind in ("image", "photo"):
             types = [("Images", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")]
         else:
             types = field.file_types or [
@@ -523,6 +538,13 @@ class FormDialog(BaseDialog):
                                           filetypes=types)
         if path:
             field.variable.set(path)
+
+    def _capture(self, field: FormField) -> None:
+        if not field.on_capture:
+            return
+        path = field.on_capture()
+        if path:
+            field.variable.set(str(path))
 
     # ------------------------------------------------------------------
     def get_values(self) -> dict:

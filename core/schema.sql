@@ -114,6 +114,11 @@ CREATE TABLE IF NOT EXISTS faculty (
     email           TEXT,
     address         TEXT,
     branch_id       INTEGER REFERENCES branches(branch_id) ON DELETE SET NULL,
+    -- Free-text department for staff who belong to a general/support
+    -- department (Applied Science, Accountancy & Taxation, Workshop) rather
+    -- than a diploma branch with its own courses and semesters. When
+    -- branch_id is set, the branch name is shown instead and this is unused.
+    department      TEXT,
     joining_date    TEXT,
     photo_path      TEXT,
     status          TEXT    NOT NULL DEFAULT 'Active',

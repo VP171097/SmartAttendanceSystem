@@ -8,6 +8,7 @@
     "college_website": "www.ggpshamli.ac.in",
     "principal_name": "Jitendra Kumar",
     "affiliation": "Affiliated to Board of Technical Education, Uttar Pradesh (BTEUP)  |  Approved by AICTE, New Delhi",
+    "college_established": "1989",
     "logo_path": "C:\\Users\\vivek\\Ankita\\Attendance\\SmartAttendanceSystem\\assets\\college_logo.png",
     "attendance_threshold": 75.0,
     "late_threshold_minutes": 10,
@@ -15,7 +16,7 @@
     "current_academic_session": "2026-27",
     "face_tolerance": 0.45,
     "face_min_confidence": 55.0,
-    "face_dataset_size": 60,
+    "face_dataset_size": 30,
     "face_detection_model": "hog",
     "camera_index": 0,
     "save_attendance_snapshot": true,
@@ -24,9 +25,9 @@
     "auto_backup": true,
     "auto_backup_days": 7,
     "backup_retention": 20,
-    "rows_per_page": 25,
+    "rows_per_page": 50,
     "enforce_timetable_window": false,
     "session_timeout_minutes": 120,
     "allow_self_attendance": true,
-    "self_mark_grace_minutes": 240
+    "self_mark_grace_minutes": 480
 }

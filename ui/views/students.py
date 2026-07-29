@@ -19,7 +19,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from config.settings import (GENDERS, STUDENT_STATUSES, config)
-from config.theme import FONTS, SEMANTIC, color
+from config.theme import FONTS, SEMANTIC, color, percentage_color
 from core.auth import session
 from core.logger import get_logger
 from core.validators import (validate_email, validate_enrollment, validate_mobile,
@@ -375,8 +375,11 @@ class StudentsView(ctk.CTkFrame):
             FormField("batch_id", "Batch", "select", options=lookups["batches"]),
             FormField("session_id", "Academic Session", "select",
                       options=lookups["sessions"]),
-            FormField("photo_source", "Photograph", "image", span=2,
-                      hint="Stored as EnrollmentNo_StudentName.jpg"),
+            FormField("photo_source", "Photograph", "photo", span=2,
+                      on_capture=lambda: SinglePhotoDialog(
+                          self, "Capture Student Photo").show(),
+                      hint="Stored as EnrollmentNo_StudentName.jpg. Capture with "
+                           "the camera or upload an existing file."),
         ]
 
     def add_student(self) -> None:
@@ -588,6 +591,50 @@ class StudentsView(ctk.CTkFrame):
         self._train_and_save(record, dataset_dir, count)
 
     def _train_and_save(self, record: dict, dataset_dir, captured: int) -> None:
+        """Check for a duplicate face, then encode the dataset and retrain."""
+        check = ProgressDialog(self, "Checking for Duplicates",
+                               "Comparing against other registered students...")
+        check.update_progress(1, 2, "Checking")
+
+        def check_worker() -> None:
+            try:
+                matches = face_service.find_duplicate_matches(
+                    record["student_id"], dataset_dir)
+            except Exception as exc:            # noqa: BLE001
+                logger.error("Duplicate check failed: %s", exc, exc_info=True)
+                matches = []
+            self.after(0, lambda: self._after_duplicate_check(
+                check, matches, record, dataset_dir, captured))
+
+        threading.Thread(target=check_worker, daemon=True,
+                         name="duplicate-check").start()
+
+    def _after_duplicate_check(self, check: ProgressDialog, matches: list[dict],
+                               record: dict, dataset_dir, captured: int) -> None:
+        check.update_progress(2, 2, "Done")
+        check.finish()
+
+        if matches:
+            best = matches[0]
+            names = "\n".join(f"  - {m['full_name']} ({m['enrollment_no']}) "
+                              f"- {m['confidence']:.0f}% match" for m in matches[:5])
+            proceed = ask_confirm(
+                self, "Possible Duplicate Face",
+                f"The captured face closely resembles {len(matches)} already-"
+                f"registered student(s):\n\n{names}\n\n"
+                "This can mean the same person was registered twice, or two "
+                "students' photos got mixed up. Check the photos before "
+                "continuing.\n\n"
+                f"Register this dataset for {record['full_name']} anyway?",
+                confirm_text="Register Anyway", cancel_text="Cancel", danger=True)
+            if not proceed:
+                show_info(self, "Registration Cancelled",
+                          "The captured dataset was discarded. Nothing was saved.")
+                return
+
+        self._run_training(record, dataset_dir, captured)
+
+    def _run_training(self, record: dict, dataset_dir, captured: int) -> None:
         """Encode the dataset and retrain the shared model."""
         progress = ProgressDialog(self, "Training Recognition Model",
                                   f"Encoding {captured} image(s) for {record['full_name']}...")
@@ -789,7 +836,6 @@ class StudentsView(ctk.CTkFrame):
                          "The source and target semester must be different.")
             return
 
-        # Preview before committing.
         candidates = student_model.get_class_students(
             values["branch_id"], values["from_semester_id"], values.get("section_id"))
 
@@ -803,18 +849,12 @@ class StudentsView(ctk.CTkFrame):
         to_name = next(s["semester_name"] for s in semesters
                        if s["semester_id"] == values["to_semester_id"])
 
-        preview = "\n".join(f"  {s['roll_no']}. {s['full_name']} ({s['enrollment_no']})"
-                            for s in candidates[:12])
-        if len(candidates) > 12:
-            preview += f"\n  ... and {len(candidates) - 12} more"
+        # Individual selection matters: students who failed are held back, so
+        # promoting the whole cohort blindly would be wrong.
+        selected_ids = PromotionSelectionDialog(
+            self, [dict(c) for c in candidates], from_name, to_name).show()
 
-        if not ask_confirm(
-                self, "Confirm Promotion",
-                f"Promote {len(candidates)} student(s) from {from_name} to {to_name}?\n\n"
-                f"{preview}\n\n"
-                "Attendance history stays attached to the classes already held, "
-                "so past percentages remain correct.",
-                confirm_text=f"Promote {len(candidates)}"):
+        if not selected_ids:
             return
 
         ok, message, count = student_model.promote_students(
@@ -823,13 +863,209 @@ class StudentsView(ctk.CTkFrame):
             to_semester_id=values["to_semester_id"],
             section_id=values.get("section_id"),
             to_session_id=values.get("to_session_id"),
+            student_ids=selected_ids,
             user=session.user)
 
         if ok:
-            show_success(self, "Promotion Complete", message)
+            held_back = len(candidates) - count
+            detail = message
+            if held_back:
+                detail += (f"\n\n{held_back} student(s) were not selected and "
+                           f"remain in {from_name}.")
+            show_success(self, "Promotion Complete", detail)
             self.refresh()
         else:
             show_error(self, "Promotion Failed", message)
+
+
+# ===========================================================================
+# Promotion selection
+# ===========================================================================
+class PromotionSelectionDialog(ctk.CTkToplevel):
+    """Pick exactly which students move up.
+
+    Everyone is ticked by default -- the common case is a whole cohort
+    progressing -- but each student can be unticked, which is how a failed
+    student is held back.  Attendance percentage is shown alongside each name
+    so the decision can be made without leaving the dialog.
+    """
+
+    def __init__(self, parent, students: list[dict], from_name: str, to_name: str):
+        super().__init__(parent)
+
+        self.students = students
+        self.result: list[int] | None = None
+        self._vars: dict[int, tk.BooleanVar] = {}
+
+        self.title("Select Students to Promote")
+        self.configure(fg_color=color("bg"))
+        self.resizable(True, True)
+        self.minsize(620, 460)
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+
+        width, height = 760, 640
+        x = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
+        y = parent.winfo_rooty() + 40
+        self.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+
+        self._build(from_name, to_name)
+        self.after(80, self._make_modal)
+
+    def _make_modal(self) -> None:
+        try:
+            self.grab_set()
+            self.lift()
+        except tk.TclError:
+            pass
+
+    def _build(self, from_name: str, to_name: str) -> None:
+        header = ctk.CTkFrame(self, fg_color=color("surface"), corner_radius=0,
+                              height=62)
+        header.pack(side="top", fill="x")
+        header.pack_propagate(False)
+
+        titles = ctk.CTkFrame(header, fg_color="transparent")
+        titles.pack(side="left", padx=20, pady=10)
+        ctk.CTkLabel(titles, text=f"Promote {from_name} to {to_name}",
+                     font=(FONTS["heading"][0], 15, "bold"),
+                     text_color=color("text"), anchor="w").pack(fill="x")
+        ctk.CTkLabel(titles,
+                     text=("Untick any student who has failed or is otherwise "
+                           "being held back."),
+                     font=(FONTS["small"][0], 11),
+                     text_color=color("text_muted"), anchor="w").pack(fill="x")
+
+        # ---- footer first, so the buttons are always reachable -------------
+        footer = ctk.CTkFrame(self, fg_color=color("surface"), corner_radius=0,
+                              height=64)
+        footer.pack(side="bottom", fill="x")
+        footer.pack_propagate(False)
+
+        self.count_label = ctk.CTkLabel(footer, text="", font=FONTS["small_bold"],
+                                        text_color=color("primary"), anchor="w")
+        self.count_label.pack(side="left", padx=20)
+
+        buttons = ctk.CTkFrame(footer, fg_color="transparent")
+        buttons.pack(side="right", padx=20, pady=13)
+
+        ctk.CTkButton(buttons, text="Cancel", command=self._cancel, width=110,
+                      height=37, corner_radius=7, fg_color="transparent",
+                      border_width=1, border_color=color("border"),
+                      text_color=color("text"), hover_color=color("surface_alt"),
+                      font=FONTS["body_bold"]).pack(side="right", padx=(10, 0))
+
+        self.promote_button = ctk.CTkButton(
+            buttons, text="Promote Selected", command=self._confirm, width=170,
+            height=37, corner_radius=7, font=FONTS["body_bold"],
+            fg_color=SEMANTIC["purple"], hover_color="#6D28D9")
+        self.promote_button.pack(side="right")
+
+        # ---- bulk toggles ---------------------------------------------------
+        toolbar = ctk.CTkFrame(self, fg_color="transparent")
+        toolbar.pack(side="top", fill="x", padx=18, pady=(12, 6))
+
+        for text, command in (("Select All", lambda: self._set_all(True)),
+                              ("Clear All", lambda: self._set_all(False)),
+                              ("Only Eligible", self._select_eligible)):
+            ctk.CTkButton(toolbar, text=text, command=command, width=120, height=30,
+                          corner_radius=6, font=FONTS["small_bold"],
+                          fg_color="transparent", border_width=1,
+                          border_color=color("border"), text_color=color("text"),
+                          hover_color=color("surface_alt")).pack(side="left",
+                                                                 padx=(0, 7))
+
+        threshold = float(config.get("attendance_threshold", 75))
+        ctk.CTkLabel(toolbar,
+                     text=f"'Only Eligible' ticks students at or above {threshold:.0f}% "
+                          "attendance.",
+                     font=FONTS["small"],
+                     text_color=color("text_muted")).pack(side="left", padx=8)
+
+        # ---- student list -----------------------------------------------------
+        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        body.pack(side="top", fill="both", expand=True, padx=18, pady=(0, 8))
+
+        from models import attendance as attendance_model
+        for student in self.students:
+            try:
+                summary = attendance_model.get_student_summary(student["student_id"])
+                percentage = summary["percentage"]
+                total = summary["total"]
+            except Exception:                   # noqa: BLE001
+                percentage, total = 0.0, 0
+            student["_percentage"] = percentage
+            student["_total"] = total
+
+            row = ctk.CTkFrame(body, height=0, corner_radius=7,
+                               fg_color=color("surface_alt"))
+            row.pack(fill="x", pady=2)
+
+            variable = tk.BooleanVar(value=True)
+            self._vars[student["student_id"]] = variable
+            variable.trace_add("write", lambda *_: self._update_count())
+
+            ctk.CTkCheckBox(row, text="", variable=variable, width=26,
+                            corner_radius=5).pack(side="left", padx=(11, 4), pady=8)
+
+            ctk.CTkLabel(row, text=str(student["roll_no"]), font=FONTS["body_bold"],
+                         text_color=color("text"), width=44,
+                         anchor="w").pack(side="left")
+
+            details = ctk.CTkFrame(row, fg_color="transparent")
+            details.pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(details, text=student["full_name"], font=FONTS["body"],
+                         text_color=color("text"), anchor="w").pack(fill="x")
+            ctk.CTkLabel(details, text=student["enrollment_no"],
+                         font=(FONTS["small"][0], 10),
+                         text_color=color("text_muted"), anchor="w").pack(fill="x")
+
+            ctk.CTkLabel(row,
+                         text=(f"{percentage:.1f}%  ({total} classes)"
+                               if total else "no attendance yet"),
+                         font=FONTS["small_bold"],
+                         text_color=(percentage_color(percentage, threshold)
+                                     if total else color("text_muted"))
+                         ).pack(side="right", padx=14)
+
+        self._update_count()
+
+    def _set_all(self, value: bool) -> None:
+        for variable in self._vars.values():
+            variable.set(value)
+
+    def _select_eligible(self) -> None:
+        threshold = float(config.get("attendance_threshold", 75))
+        for student in self.students:
+            eligible = (student.get("_total", 0) == 0
+                        or student.get("_percentage", 0) >= threshold)
+            self._vars[student["student_id"]].set(eligible)
+
+    def _update_count(self) -> None:
+        selected = sum(1 for v in self._vars.values() if v.get())
+        held = len(self._vars) - selected
+        self.count_label.configure(
+            text=f"{selected} selected for promotion"
+                 + (f"   |   {held} held back" if held else ""))
+        self.promote_button.configure(state="normal" if selected else "disabled")
+
+    def _confirm(self) -> None:
+        self.result = [sid for sid, var in self._vars.items() if var.get()]
+        self._close()
+
+    def _cancel(self) -> None:
+        self.result = None
+        self._close()
+
+    def _close(self) -> None:
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+    def show(self):
+        self.wait_window()
+        return self.result
 
 
 # ===========================================================================
@@ -974,3 +1210,209 @@ class CaptureDialog(ctk.CTkToplevel):
     def show(self):
         self.wait_window()
         return self.result
+
+
+# ===========================================================================
+# Single-photo capture -- profile photo, not the face-recognition dataset
+# ===========================================================================
+class SinglePhotoDialog(ctk.CTkToplevel):
+    """Live camera preview with a single Capture button.
+
+    Used for the profile photo (Add/Edit Student, and a student's own
+    self-service update) -- distinct from :class:`CaptureDialog`, which builds
+    the multi-image face-recognition dataset.
+    """
+
+    def __init__(self, parent, title: str):
+        super().__init__(parent)
+
+        self.result: str | None = None
+        self._frame = None
+        self._preview_image = None
+        self._captured_path: Path | None = None
+        self._running = True
+        self._camera_index = int(config.get("camera_index", 0))
+
+        self.title(title)
+        self.configure(fg_color=color("bg"))
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+
+        width, height = 560, 560
+        x = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
+        y = parent.winfo_rooty() + 40
+        self.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+
+        self._build(title)
+        self.after(80, self._make_modal)
+        self.after(200, self._start_camera)
+
+    def _make_modal(self) -> None:
+        try:
+            self.grab_set()
+            self.lift()
+        except tk.TclError:
+            pass
+
+    def _build(self, title: str) -> None:
+        ctk.CTkLabel(self, text=title, font=FONTS["heading"],
+                     text_color=color("text")).pack(pady=(18, 4))
+
+        self.preview = ctk.CTkLabel(self, text="Starting camera...", font=FONTS["body"],
+                                    text_color=color("text_muted"), fg_color="#0B1220",
+                                    corner_radius=8, width=480, height=360)
+        self.preview.pack(padx=20)
+
+        self.hint_label = ctk.CTkLabel(
+            self, text="Look at the camera, then press Capture.",
+            font=FONTS["small"], text_color=color("text_muted"))
+        self.hint_label.pack(pady=(10, 0))
+
+        self.buttons = ctk.CTkFrame(self, fg_color="transparent")
+        self.buttons.pack(pady=16)
+
+        # Two button sets that swap: "live" (Capture / Cancel) and
+        # "reviewing" (Use This Photo / Retake / Cancel).
+        self.live_buttons = ctk.CTkFrame(self.buttons, fg_color="transparent")
+        self.review_buttons = ctk.CTkFrame(self.buttons, fg_color="transparent")
+
+        self.capture_button = ctk.CTkButton(
+            self.live_buttons, text="Capture", command=self._capture, width=140,
+            height=38, corner_radius=7, font=FONTS["body_bold"])
+        self.capture_button.pack(side="left", padx=5)
+        ctk.CTkButton(self.live_buttons, text="Cancel", command=self._cancel,
+                      width=100, height=38, corner_radius=7, font=FONTS["body_bold"],
+                      fg_color="transparent", border_width=1,
+                      border_color=color("border"), text_color=color("text"),
+                      hover_color=color("surface_alt")).pack(side="left", padx=5)
+
+        ctk.CTkButton(self.review_buttons, text="Use This Photo", command=self._confirm,
+                      width=150, height=38, corner_radius=7, font=FONTS["body_bold"],
+                      fg_color=SEMANTIC["success"], hover_color="#15803D"
+                      ).pack(side="left", padx=5)
+        ctk.CTkButton(self.review_buttons, text="Retake", command=self._retake,
+                      width=110, height=38, corner_radius=7, font=FONTS["body_bold"],
+                      fg_color="transparent", border_width=1, border_color=color("border"),
+                      text_color=color("text"), hover_color=color("surface_alt")
+                      ).pack(side="left", padx=5)
+        ctk.CTkButton(self.review_buttons, text="Cancel", command=self._cancel,
+                      width=100, height=38, corner_radius=7, font=FONTS["body_bold"],
+                      fg_color="transparent", border_width=1,
+                      border_color=color("border"), text_color=color("text"),
+                      hover_color=color("surface_alt")).pack(side="left", padx=5)
+
+        self.live_buttons.pack()
+
+    def _start_camera(self) -> None:
+        self._running = True
+        self._captured_path = None
+        self._thread = threading.Thread(target=self._camera_loop, daemon=True,
+                                        name="photo-capture")
+        self._thread.start()
+        self._poll()
+
+    def _camera_loop(self) -> None:
+        import time
+        import cv2
+        camera = cv2.VideoCapture(self._camera_index, cv2.CAP_DSHOW)
+        if not camera.isOpened():
+            camera = cv2.VideoCapture(self._camera_index)
+        if not camera.isOpened():
+            self._frame = "error"
+            return
+
+        camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        while self._running:
+            ok, frame = camera.read()
+            if ok:
+                self._frame = cv2.flip(frame, 1)
+            time.sleep(0.03)
+        camera.release()
+
+    def _poll(self) -> None:
+        if not self._running:
+            return
+
+        if isinstance(self._frame, str) and self._frame == "error":
+            self.preview.configure(
+                text=f"Camera {self._camera_index} could not be opened.\n\n"
+                     "Check that no other application is using it.")
+            self.capture_button.configure(state="disabled")
+            return
+
+        if self._frame is not None and not isinstance(self._frame, str):
+            try:
+                import cv2
+                rgb = cv2.cvtColor(self._frame, cv2.COLOR_BGR2RGB)
+                image = Image.fromarray(rgb).resize((480, 360), Image.LANCZOS)
+                self._preview_image = ctk.CTkImage(image, size=(480, 360))
+                self.preview.configure(image=self._preview_image, text="")
+            except Exception:                   # noqa: BLE001
+                pass
+
+        self.after(33, self._poll)
+
+    def _capture(self) -> None:
+        if self._frame is None or isinstance(self._frame, str):
+            return
+
+        import cv2
+        from config.settings import TEMP_DIR
+        TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        path = TEMP_DIR / f"profile_capture_{datetime.now():%Y%m%d_%H%M%S}.jpg"
+        cv2.imwrite(str(path), self._frame)
+        self._captured_path = path
+
+        self._running = False   # freeze the preview on the captured frame
+        self.hint_label.configure(text="Captured. Use this photo, or retake it.")
+        self.live_buttons.pack_forget()
+        self.review_buttons.pack()
+
+    def _retake(self) -> None:
+        self.review_buttons.pack_forget()
+        self.live_buttons.pack()
+        self.capture_button.configure(state="normal")
+        self.hint_label.configure(text="Look at the camera, then press Capture.")
+        self._start_camera()
+
+    def _confirm(self) -> None:
+        self.result = str(self._captured_path) if self._captured_path else None
+        self._close()
+
+    def _cancel(self) -> None:
+        self.result = None
+        self._close()
+
+    def _close(self) -> None:
+        self._running = False
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+    def show(self):
+        self.wait_window()
+        return self.result
+
+
+def choose_photo_source(parent, title: str, subject_name: str = "") -> str | None:
+    """Ask Capture vs Upload, then return a file path (or None if cancelled).
+
+    Shared by Add/Edit Student, the student self-service profile update, and
+    anywhere a single photograph is needed rather than a face-recognition
+    dataset.
+    """
+    use_camera = ask_confirm(
+        parent, title,
+        (f"Update the photo for {subject_name}?\n\n" if subject_name else "") +
+        "Choose how to provide the photo.",
+        confirm_text="Use Camera", cancel_text="Upload File")
+
+    if use_camera:
+        return SinglePhotoDialog(parent, title).show()
+
+    return pick_file(parent, "Select a photo",
+                     [("Images", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")])

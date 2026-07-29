@@ -258,7 +258,10 @@ def authenticate(username: str, password: str, expected_role: str | None = None)
     if not username or not password:
         raise AuthError("Please enter both username and password.")
 
-    row = db.fetch_one("SELECT * FROM users WHERE username = ?", (username,))
+    # Case-insensitive: a lecturer's username is their faculty code, and they
+    # will type it as FAC001 as readily as fac001.
+    row = db.fetch_one("SELECT * FROM users WHERE LOWER(username) = LOWER(?)",
+                       (username,))
 
     if row is None:
         # Same message for unknown user and wrong password -- do not confirm
@@ -385,7 +388,9 @@ def create_user(username: str, password: str, role: str, full_name: str,
                 must_change: bool = True) -> int:
     """Create a login account.  Returns the new ``user_id``."""
     db = get_db()
-    if db.exists("users", "username = ?", (username,)):
+    # Compare case-insensitively so 'FAC001' and 'fac001' cannot both exist and
+    # then collide at sign-in.
+    if db.exists("users", "LOWER(username) = LOWER(?)", (username,)):
         raise AuthError(f"Username '{username}' is already taken.")
 
     user_id = db.insert("users", {
@@ -433,7 +438,8 @@ RESET_FIELDS = ("mobile", "dob")
 def find_account(username: str) -> dict | None:
     """Look up an account for the reset flow.  Returns None if unknown."""
     row = get_db().fetch_one(
-        "SELECT * FROM users WHERE username = ?", ((username or "").strip(),))
+        "SELECT * FROM users WHERE LOWER(username) = LOWER(?)",
+        ((username or "").strip(),))
     return dict(row) if row else None
 
 
