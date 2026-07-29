@@ -21,6 +21,7 @@ from config.settings import config
 from config.theme import FONTS, SEMANTIC, color
 from core.auth import session
 from core.logger import get_logger
+from core.scope import current_scope
 from models import academic, attendance as attendance_model
 from services import analytics_service
 from ui.widgets.components import EmptyState, PageHeader, SectionCard, StatCard
@@ -43,9 +44,15 @@ class AnalyticsView(ctk.CTkFrame):
 
     # ==================================================================
     def _build(self) -> None:
+        self.scope = current_scope()
+
         header = PageHeader(
             self, title="Analytics",
-            subtitle="Trends and comparisons across branches, subjects, faculty and time",
+            subtitle=("Your own attendance trends" if self.scope.is_student
+                      else "Trends and comparisons for the classes you teach"
+                      if self.scope.is_faculty
+                      else "Trends and comparisons across branches, subjects, "
+                           "faculty and time"),
             icon="◱")
         header.pack(fill="x", padx=18, pady=(14, 10))
         header.add_button("Refresh Charts", self.refresh, width=145)
@@ -79,7 +86,8 @@ class AnalyticsView(ctk.CTkFrame):
 
         add_control("branch_id", "Branch",
                     {"All Branches": None,
-                     **{b["branch_name"]: b["branch_id"] for b in academic.get_branches()}},
+                     **{b["branch_name"]: b["branch_id"]
+                        for b in self.scope.allowed_branches()}},
                     190)
         add_control("semester_id", "Semester",
                     {"All Semesters": None,
@@ -260,16 +268,37 @@ class AnalyticsView(ctk.CTkFrame):
         grid.grid_columnconfigure(0, weight=1, uniform="grid")
         grid.grid_columnconfigure(1, weight=1, uniform="grid")
 
-        specs = [
-            ("Branch Comparison", "Average attendance by branch",
-             analytics_service.branch_comparison_chart, "branch"),
-            ("Subject Comparison", "Average attendance by subject",
-             analytics_service.subject_comparison_chart, "subject"),
-            ("Faculty Comparison", "Attendance achieved in each faculty's classes",
-             analytics_service.faculty_comparison_chart, "faculty"),
-            ("Semester Comparison", "Average attendance by semester",
-             analytics_service.semester_comparison_chart, "semester"),
-        ]
+        # A student has no peers to compare against, and a lecturer has no
+        # business seeing a colleague's numbers -- so the comparison set is
+        # chosen to match what each role may legitimately look at.
+        if self.scope.is_student:
+            specs = [
+                ("My Subject Comparison", "Your attendance in each subject",
+                 analytics_service.subject_comparison_chart, "subject"),
+            ]
+        elif self.scope.is_faculty:
+            specs = [
+                ("My Subject Comparison",
+                 "Attendance across the subjects you teach",
+                 analytics_service.subject_comparison_chart, "subject"),
+                ("My Semester Comparison",
+                 "Attendance across the semesters you teach",
+                 analytics_service.semester_comparison_chart, "semester"),
+                ("My Branch Comparison",
+                 "Attendance across the branches you teach in",
+                 analytics_service.branch_comparison_chart, "branch"),
+            ]
+        else:
+            specs = [
+                ("Branch Comparison", "Average attendance by branch",
+                 analytics_service.branch_comparison_chart, "branch"),
+                ("Subject Comparison", "Average attendance by subject",
+                 analytics_service.subject_comparison_chart, "subject"),
+                ("Faculty Comparison", "Attendance achieved in each faculty's classes",
+                 analytics_service.faculty_comparison_chart, "faculty"),
+                ("Semester Comparison", "Average attendance by semester",
+                 analytics_service.semester_comparison_chart, "semester"),
+            ]
 
         for index, (title, subtitle, builder, key) in enumerate(specs):
             card = SectionCard(grid, title, subtitle)

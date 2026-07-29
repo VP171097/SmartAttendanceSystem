@@ -96,7 +96,7 @@ class SettingsView(ctk.CTkFrame):
 
     def _field(self, parent, key: str, label: str, hint: str = "",
                kind: str = "text", options: list | None = None,
-               width: int = 420) -> ctk.CTkBaseClass:
+               width: int = 420, readonly: bool = False) -> ctk.CTkBaseClass:
         """One labelled setting bound to ``config[key]``."""
         holder = ctk.CTkFrame(parent, fg_color="transparent")
         holder.pack(fill="x", pady=(0, 12))
@@ -131,6 +131,8 @@ class SettingsView(ctk.CTkFrame):
             widget = ctk.CTkEntry(holder, textvariable=variable, width=width, height=34,
                                   corner_radius=7, font=FONTS["body"])
             widget.pack(anchor="w")
+            if readonly:
+                widget.configure(state="disabled", fg_color=color("surface_alt"))
 
         if hint:
             ctk.CTkLabel(holder, text=hint, font=FONTS["small"],
@@ -176,7 +178,13 @@ class SettingsView(ctk.CTkFrame):
         self._field(card.body, "college_website", "Website", width=380)
         self._field(card.body, "principal_name", "Principal's Name",
                     "Printed in the signature block of every report", width=380)
-        self._field(card.body, "affiliation", "Affiliation", width=560)
+        self._field(card.body, "college_established", "Year Established",
+                    "Shown on the About page and in reports", width=160)
+        self._field(card.body, "affiliation", "Affiliation", kind="textarea", width=560)
+        self._field(card.body, "current_academic_session", "Current Academic Session",
+                    "Read-only here -- change it from Academic Setup -> "
+                    "Academic Sessions -> Set as Current, which keeps every "
+                    "linked record consistent.", readonly=True, width=220)
 
         # ---- logo ------------------------------------------------------
         logo_card = SectionCard(page, "College Logo",
@@ -265,7 +273,7 @@ class SettingsView(ctk.CTkFrame):
         updates = {key: self._read(key) for key in (
             "college_name", "college_short_name", "college_code", "college_address",
             "college_phone", "college_email", "college_website", "principal_name",
-            "affiliation")}
+            "college_established", "affiliation")}
 
         if not (updates.get("college_name") or "").strip():
             show_warning(self, "Name Required", "College name cannot be blank.")
@@ -647,12 +655,12 @@ class SettingsView(ctk.CTkFrame):
     # ==================================================================
     def _build_account(self) -> None:
         page = self._page("My Account")
+        self._build_profile_card(page)
 
-        card = SectionCard(page, "Signed-in User", "Your account details")
-        card.pack(fill="x", pady=(6, 14))
+        card = SectionCard(page, "Account", "Sign-in details")
+        card.pack(fill="x", pady=(0, 14))
 
         for label, value in (
-                ("Full Name", session.full_name),
                 ("Username", session.username),
                 ("Role", session.role),
                 ("Signed in at", session.login_time.strftime("%d %b %Y, %I:%M %p")
@@ -685,6 +693,125 @@ class SettingsView(ctk.CTkFrame):
                       command=self.change_own_password, width=190, height=38,
                       corner_radius=7, font=FONTS["body_bold"]).pack(anchor="w",
                                                                      pady=(14, 0))
+
+    def _build_profile_card(self, page) -> None:
+        """Full role-specific profile: who you are on record, with a photo."""
+        profile = session.profile or {}
+        card = SectionCard(
+            page, "My Profile",
+            f"Your record as {session.role.lower()} - contact the administrator "
+            "to correct anything here" if not self._is_admin else "Your record")
+        card.pack(fill="x", pady=(6, 14))
+
+        row = ctk.CTkFrame(card.body, fg_color="transparent")
+        row.pack(fill="x")
+
+        # ---- photo -----------------------------------------------------
+        photo_holder = ctk.CTkFrame(row, fg_color="transparent")
+        photo_holder.pack(side="left", padx=(0, 20))
+        self._profile_photo_label = ctk.CTkLabel(
+            photo_holder, text="", width=96, height=96)
+        self._profile_photo_label.pack()
+        self._render_profile_photo(profile.get("photo_path"))
+
+        if session.is_student:
+            ctk.CTkButton(photo_holder, text="Update Photo",
+                          command=self.update_own_photo, width=96, height=26,
+                          corner_radius=6, font=(FONTS["small"][0], 10, "bold")
+                          ).pack(pady=(6, 0))
+
+        # ---- fields -------------------------------------------------------
+        details = ctk.CTkFrame(row, fg_color="transparent")
+        details.pack(side="left", fill="both", expand=True)
+
+        if session.is_faculty:
+            fields = [
+                ("Full Name", profile.get("full_name")),
+                ("Faculty Code", profile.get("faculty_code")),
+                ("Designation", profile.get("designation")),
+                ("Qualification", profile.get("qualification")),
+                ("Department", profile.get("branch_name") or profile.get("department") or "-"),
+                ("Experience", f"{profile['experience_years']:g} years" if profile.get('experience_years') else "-"),
+                ("Mobile", profile.get("mobile")),
+                ("Email", profile.get("email")),
+                ("Joining Date", profile.get("joining_date")),
+                ("Status", profile.get("status")),
+            ]
+        elif session.is_student:
+            fields = [
+                ("Full Name", profile.get("full_name")),
+                ("Enrollment No", profile.get("enrollment_no")),
+                ("Roll No", profile.get("roll_no")),
+                ("Branch", profile.get("branch_name")),
+                ("Semester", profile.get("semester_name")),
+                ("Section", profile.get("section_name") or "-"),
+                ("Batch", profile.get("batch_name") or "-"),
+                ("Academic Session", profile.get("session_name") or "-"),
+                ("Date of Birth", profile.get("dob")),
+                ("Father's Name", profile.get("father_name")),
+                ("Mother's Name", profile.get("mother_name")),
+                ("Mobile", profile.get("mobile")),
+                ("Email", profile.get("email")),
+                ("Face Registered",
+                 "Yes" if profile.get("face_registered") else "Not yet captured"),
+            ]
+        else:
+            fields = [("Full Name", session.full_name), ("Role", "Administrator")]
+
+        grid = ctk.CTkFrame(details, fg_color="transparent")
+        grid.pack(fill="x")
+        grid.grid_columnconfigure(0, weight=1, uniform="prof")
+        grid.grid_columnconfigure(1, weight=1, uniform="prof")
+
+        for index, (label, value) in enumerate(fields):
+            cell = ctk.CTkFrame(grid, fg_color="transparent")
+            cell.grid(row=index // 2, column=index % 2, sticky="ew",
+                     padx=(0, 16), pady=2)
+            ctk.CTkLabel(cell, text=label, font=FONTS["small_bold"],
+                         text_color=color("text_muted"), width=130,
+                         anchor="w").pack(side="left")
+            ctk.CTkLabel(cell, text=str(value or "-"), font=FONTS["body"],
+                         text_color=color("text"), anchor="w", wraplength=220,
+                         justify="left").pack(side="left", fill="x", expand=True)
+
+    def _render_profile_photo(self, photo_path) -> None:
+        if photo_path and Path(photo_path).exists():
+            try:
+                from PIL import Image
+                image = ctk.CTkImage(Image.open(photo_path), size=(96, 96))
+                self._profile_photo_label.configure(image=image, text="")
+                return
+            except Exception:                   # noqa: BLE001
+                pass
+        initials = "".join(w[0] for w in session.full_name.split()[:2]
+                           if w[0].isalpha()).upper() or "?"
+        self._profile_photo_label.configure(
+            image=None, text=initials, fg_color=color("primary"),
+            text_color="#FFFFFF", font=(FONTS["title"][0], 26, "bold"),
+            corner_radius=48, width=96, height=96)
+
+    def update_own_photo(self) -> None:
+        """Student self-service photo update -- capture or upload."""
+        from ui.views.students import choose_photo_source
+        from models import student as student_model
+
+        source = choose_photo_source(self, "Update My Photo", session.full_name)
+        if not source:
+            return
+
+        student_id = session.linked_id
+        student = student_model.get_student(student_id)
+        ok, message = student_model.update_student(
+            student_id, {}, photo_source=source, user=session.user)
+
+        if ok:
+            session.refresh_profile()
+            self._render_profile_photo(session.profile.get("photo_path")
+                                       if session.profile else None)
+            show_success(self, "Photo Updated",
+                         "Your photo has been updated.")
+        else:
+            show_error(self, "Could Not Update Photo", message)
 
     def change_own_password(self) -> None:
         current = self._password_entries["current"].get()

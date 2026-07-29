@@ -330,3 +330,20 @@ def title_case(value: str) -> str:
     """Title-case a person's name without mangling initials."""
     return " ".join(word.capitalize() if len(word) > 2 else word.upper()
                     for word in str(value or "").split())
+
+
+HONORIFICS = {"mr", "mr.", "mrs", "mrs.", "ms", "ms.", "dr", "dr.",
+             "prof", "prof.", "shri", "smt", "km"}
+
+
+def first_name(full_name: str) -> str:
+    """First given name, skipping any honorific.
+
+    ``"Mr. Sanjay Kumar"`` -> ``"Sanjay"``, not ``"Mr."`` -- greetings and
+    short labels read a name's first *word* by default, which truncates badly
+    for the honorific-prefixed names common in a college's staff directory.
+    """
+    for word in str(full_name or "").split():
+        if word.lower().strip(".") not in {h.strip(".") for h in HONORIFICS}:
+            return word
+    return str(full_name or "").strip()

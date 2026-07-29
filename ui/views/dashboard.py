@@ -53,9 +53,12 @@ class DashboardView(ctk.CTkFrame):
         greeting = ("Good morning" if hour < 12
                     else "Good afternoon" if hour < 17 else "Good evening")
 
+        from core.validators import first_name
+        display_name = first_name(session.full_name) if session.full_name else "there"
+
         header = PageHeader(
             self.page,
-            title=f"{greeting}, {session.full_name.split()[0] if session.full_name else 'there'}",
+            title=f"{greeting}, {display_name}",
             subtitle=(f"{session.role} dashboard  |  "
                       f"{datetime.now():%A, %d %B %Y}  |  "
                       f"Session {config.get('current_academic_session','')}"),
