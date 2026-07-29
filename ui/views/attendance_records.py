@@ -18,6 +18,7 @@ from config.settings import ATTENDANCE_STATUSES
 from config.theme import FONTS, SEMANTIC, color
 from core.auth import Permission, session
 from core.logger import get_logger
+from core.scope import current_scope
 from models import academic, attendance as attendance_model, faculty as faculty_model
 from models import subject as subject_model
 from services.report_service import generate_attendance_sheet
@@ -42,38 +43,69 @@ class AttendanceRecordsView(ctk.CTkFrame):
 
     # ==================================================================
     def _build(self) -> None:
+        # Everything on this screen is restricted to what the signed-in user
+        # may see; the scope object also drives which filters are worth showing.
+        self.scope = current_scope()
+
         header = PageHeader(
             self, title="Attendance Records",
-            subtitle="Browse conducted classes and individual attendance records",
+            subtitle=("Your own attendance history" if self.scope.is_student
+                      else "Browse conducted classes and individual attendance records"),
             icon="≡")
         header.pack(fill="x", padx=18, pady=(14, 10))
 
+        # ---- scope notice ----------------------------------------------------
+        if not self.scope.is_admin:
+            notice = ctk.CTkFrame(self, height=0, corner_radius=8,
+                                  fg_color=color("surface"), border_width=1,
+                                  border_color=SEMANTIC["info"])
+            notice.pack(fill="x", padx=18, pady=(0, 8))
+            ctk.CTkLabel(notice, text=self.scope.describe(),
+                         font=FONTS["small_bold"], text_color=color("text_muted"),
+                         anchor="w").pack(fill="x", padx=14, pady=7)
+
         # ---- filters ---------------------------------------------------------
         self.filters = FilterBar(self, on_change=self.refresh,
-                                 search_placeholder="Student name or enrollment...")
+                                 search_placeholder=("Subject or status..."
+                                                     if self.scope.is_student
+                                                     else "Student name or enrollment..."))
         self.filters.pack(fill="x", padx=18, pady=(0, 9))
 
-        self.filters.add_filter(
-            "branch_id", "Branch",
-            {b["branch_name"]: b["branch_id"] for b in academic.get_branches()}, width=175)
-        self.filters.add_filter(
-            "semester_id", "Semester",
-            {s["semester_name"]: s["semester_id"] for s in academic.get_semesters()},
-            width=125)
-        self.filters.add_filter(
-            "section_id", "Section",
-            {s["section_name"]: s["section_id"] for s in academic.get_sections()}, width=90)
+        # A student has exactly one branch/semester, so those filters would be
+        # single-valued noise; they get subject and status only.
+        if not self.scope.is_student:
+            self.filters.add_filter(
+                "branch_id", "Branch",
+                {b["branch_name"]: b["branch_id"]
+                 for b in self.scope.allowed_branches()}, width=175)
+            self.filters.add_filter(
+                "semester_id", "Semester",
+                {s["semester_name"]: s["semester_id"] for s in academic.get_semesters()},
+                width=125)
+            sections = academic.get_sections()
+            if sections:
+                self.filters.add_filter(
+                    "section_id", "Section",
+                    {s["section_name"]: s["section_id"] for s in sections}, width=90)
+
         self.filters.add_filter(
             "subject_id", "Subject",
-            {f"{s['subject_code']}": s["subject_id"]
-             for s in subject_model.search_subjects()}, width=110)
-        self.filters.add_filter(
-            "faculty_id", "Faculty",
-            {f["full_name"]: f["faculty_id"] for f in faculty_model.get_all_faculty()},
-            width=170)
+            {f"{s['subject_code']} - {s['subject_name']}": s["subject_id"]
+             for s in self.scope.allowed_subjects()}, width=190)
+
+        # A lecturer can only ever be themselves here, so the filter is dropped.
+        if self.scope.is_admin:
+            self.filters.add_filter(
+                "faculty_id", "Faculty",
+                {f["full_name"]: f["faculty_id"] for f in self.scope.allowed_faculty()},
+                width=170)
+
+        status_options = list(ATTENDANCE_STATUSES)
+        if self.scope.is_student:
+            status_options.append("Pending Approval")
         self.filters.add_filter("status", "Status",
-                                {s: s for s in ATTENDANCE_STATUSES}, width=125)
-        self.filters.add_search(190)
+                                {s: s for s in status_options}, width=140)
+        self.filters.add_search(180)
         self.filters.add_button("Reset", self.filters.reset, width=75,
                                 fg_color="transparent", border_width=1,
                                 border_color=color("border"), text_color=color("text"),
@@ -117,12 +149,20 @@ class AttendanceRecordsView(ctk.CTkFrame):
             segmented_button_selected_color=color("primary"),
             segmented_button_selected_hover_color=color("primary_hover"))
         self.tabs.pack(fill="both", expand=True, padx=18, pady=(0, 14))
-        self.tabs.add("Class Sessions")
-        self.tabs.add("Student Records")
 
-        self._build_sessions_tab()
+        # A class-session row carries whole-class counts and its detail view
+        # lists every classmate, so students get their own records only.
+        if not self.scope.is_student:
+            self.tabs.add("Class Sessions")
+        self.tabs.add("Student Records" if not self.scope.is_student
+                      else "My Attendance")
+
+        if not self.scope.is_student:
+            self._build_sessions_tab()
         self._build_records_tab()
-        self.tabs.set("Class Sessions")
+
+        self.tabs.set("Class Sessions" if not self.scope.is_student
+                      else "My Attendance")
 
     def _build_sessions_tab(self) -> None:
         tab = self.tabs.tab("Class Sessions")
@@ -172,7 +212,8 @@ class AttendanceRecordsView(ctk.CTkFrame):
         self.sessions_table.pack(fill="both", expand=True)
 
     def _build_records_tab(self) -> None:
-        tab = self.tabs.tab("Student Records")
+        tab = self.tabs.tab("My Attendance" if self.scope.is_student
+                            else "Student Records")
 
         ctk.CTkLabel(
             tab,
@@ -182,27 +223,42 @@ class AttendanceRecordsView(ctk.CTkFrame):
             font=FONTS["small"], text_color=color("text_muted"), anchor="w",
             justify="left", wraplength=1000).pack(fill="x", pady=(6, 10))
 
-        self.records_table = DataTable(
-            tab,
-            columns=[
-                column("class_date", "Date", 100, format=date_format),
+        columns = [
+            column("class_date", "Date", 100, format=date_format),
+        ]
+        if not self.scope.is_student:
+            columns += [
                 column("enrollment_no", "Enrollment No", 115),
                 column("student_name", "Student Name", 175, stretch=True),
                 column("roll_no", "Roll", 50, "center"),
-                column("subject_code", "Code", 75),
-                column("subject_name", "Subject", 165),
+            ]
+        columns += [
+            column("subject_code", "Code", 75),
+            column("subject_name", "Subject", 165),
+        ]
+        if not self.scope.is_student:
+            columns += [
                 column("branch_code", "Branch", 70, "center"),
                 column("semester_name", "Semester", 100),
-                column("status", "Status", 110, "center"),
-                column("marked_method", "Method", 130),
-                column("confidence", "Conf %", 70, "center",
-                       format=lambda v, _r: f"{float(v):.0f}%" if v else "-"),
-                column("marked_time", "Time", 80, format=dash_format),
-                column("is_modified", "Edited", 65, "center",
-                       format=lambda v, _r: "Yes" if v else ""),
-            ],
-            on_double_click=self._show_record_detail,
-            height=16)
+            ]
+        columns += [
+            column("status", "Status", 130, "center"),
+            column("marked_method", "Method", 150),
+            column("confidence", "Conf %", 70, "center",
+                   format=lambda v, _r: f"{float(v):.0f}%" if v else "-"),
+            column("marked_time", "Time", 80, format=dash_format),
+        ]
+        if self.scope.is_student:
+            # A pending self-mark needs to say whose desk it's on; a settled
+            # record has nothing here, so the column stays blank for it.
+            columns.append(column("pending_with", "Pending With", 150,
+                                  format=dash_format))
+        else:
+            columns.append(column("is_modified", "Edited", 65, "center",
+                                  format=lambda v, _r: "Yes" if v else ""))
+
+        self.records_table = DataTable(
+            tab, columns=columns, on_double_click=self._show_record_detail, height=16)
         self.records_table.pack(fill="both", expand=True)
 
     # ==================================================================
@@ -212,7 +268,7 @@ class AttendanceRecordsView(ctk.CTkFrame):
         to_date = self.to_date_var.get().strip()
 
         try:
-            sessions = attendance_model.search_sessions(
+            sessions = [] if self.scope.is_student else attendance_model.search_sessions(
                 subject_id=values.get("subject_id"),
                 faculty_id=values.get("faculty_id"),
                 branch_id=values.get("branch_id"),
@@ -240,16 +296,98 @@ class AttendanceRecordsView(ctk.CTkFrame):
                        if term in str(r["student_name"]).lower()
                        or term in str(r["enrollment_no"]).lower()]
 
-        self.sessions_table.set_data(sessions)
+        records = [dict(r) for r in records]
+
+        # A self-marked request still awaiting a decision has no visible
+        # trace in the attendance table (the underlying row is still plain
+        # Absent), so it is overlaid here as its own row rather than left to
+        # look like an unexplained absence.
+        pending_overlay = []
+        if self.scope.is_student and session.linked_id:
+            pending_overlay = self._pending_self_mark_rows(
+                subject_id=values.get("subject_id"), status_filter=values.get("status"))
+            records = pending_overlay + records
+            records.sort(key=lambda r: str(r.get("class_date", "")), reverse=True)
+
+        if not self.scope.is_student:
+            self.sessions_table.set_data(sessions)
         self.records_table.set_data(records)
 
-        attended = sum(1 for r in records if r["status"] in ("Present", "Late"))
-        percentage = (100.0 * attended / len(records)) if records else 0.0
-        locked = sum(1 for s in sessions if s["is_locked"])
+        # Percentage is computed over real attendance rows only -- a pending
+        # self-mark is not yet a fact and must not move the number either way.
+        countable = [r for r in records if r["status"] != "Pending Approval"]
+        attended = sum(1 for r in countable if r["status"] in ("Present", "Late"))
+        percentage = (100.0 * attended / len(countable)) if countable else 0.0
 
-        self.summary_label.configure(
-            text=(f"{len(sessions):,} class session(s) ({locked} locked)   |   "
-                  f"{len(records):,} record(s)   |   {percentage:.1f}% attendance"))
+        if self.scope.is_student:
+            pending_note = (f"   |   {len(pending_overlay)} awaiting approval"
+                            if pending_overlay else "")
+            self.summary_label.configure(
+                text=(f"{len(countable):,} record(s)   |   "
+                      f"{percentage:.1f}% attendance{pending_note}"))
+        else:
+            locked = sum(1 for s in sessions if s["is_locked"])
+            self.summary_label.configure(
+                text=(f"{len(sessions):,} class session(s) ({locked} locked)   |   "
+                      f"{len(records):,} record(s)   |   {percentage:.1f}% attendance"))
+
+    def _show_pending_self_mark_detail(self, request_id: int) -> None:
+        from models import self_attendance as self_model
+
+        request = self_model.get_request(request_id)
+        if request is None:
+            show_info(self, "Not Found", "This request no longer exists.")
+            self.refresh()
+            return
+
+        sections = {
+            "Self-Marked Request": [
+                ("Subject", f"{request['subject_name']} ({request['subject_code']})"),
+                ("Class Date", request["class_date"]),
+                ("Requested At", str(request["requested_at"])[:19]),
+                ("Status", request["status"]),
+                ("Pending With", request["faculty_name"] or "Class teacher"),
+                ("Your Remark", request["student_remark"] or "-"),
+            ],
+        }
+        DetailDialog(self, "Self-Marked Attendance (Pending)", sections,
+                     width=560, height=420).show()
+
+    def _pending_self_mark_rows(self, subject_id=None, status_filter=None) -> list:
+        """Synthetic rows for the current student's still-Pending self-marks."""
+        # "Pending Approval" is not one of the real attendance statuses, so a
+        # status filter for anything else would otherwise hide these rows
+        # entirely; only suppress them when the student explicitly filters to
+        # a *different* concrete status.
+        if status_filter and status_filter != "Pending Approval":
+            return []
+
+        from models import self_attendance as self_model
+        requests = self_model.get_requests(
+            status="Pending", student_id=session.linked_id)
+
+        rows = []
+        for request in requests:
+            if subject_id and request["subject_id"] != subject_id:
+                continue
+            rows.append({
+                "class_date": request["class_date"],
+                "enrollment_no": request["enrollment_no"],
+                "student_name": request["student_name"],
+                "roll_no": request["roll_no"],
+                "subject_code": request["subject_code"],
+                "subject_name": request["subject_name"],
+                "branch_code": request["branch_code"],
+                "semester_name": request["semester_name"],
+                "status": "Pending Approval",
+                "marked_method": "Self-Marked",
+                "confidence": None,
+                "marked_time": str(request["requested_at"])[11:16],
+                "is_modified": 0,
+                "pending_with": request["faculty_name"] or "Class teacher",
+                "_self_request_id": request["request_id"],
+            })
+        return rows
 
     # ==================================================================
     def view_session(self) -> None:
@@ -354,6 +492,13 @@ class AttendanceRecordsView(ctk.CTkFrame):
 
     def _show_record_detail(self, row: dict) -> None:
         """Full history of one attendance record, including its audit trail."""
+        # A pending self-mark is an overlay row with no attendance_id of its
+        # own -- show its request detail instead of trying to look up a
+        # record that does not exist yet.
+        if row.get("_self_request_id"):
+            self._show_pending_self_mark_detail(row["_self_request_id"])
+            return
+
         from core.audit import get_entity_history
 
         history = get_entity_history("attendance", row.get("attendance_id"))

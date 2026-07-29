@@ -43,9 +43,16 @@ class LeaveView(ctk.CTkFrame):
         self.app = app
         self._selected: dict | None = None
 
-        self._can_review = session.can(Permission.REVIEW_LEAVE)
-        self._can_override = session.can(Permission.OVERRIDE_LEAVE)
+        # Reviewing and overriding are class-teaching / correction actions,
+        # deliberately restricted to Faculty even though Permission.REVIEW_LEAVE
+        # and OVERRIDE_LEAVE are technically granted to Admin too (Admin holds
+        # every permission by design). The administrator's role on this screen
+        # is to view records and their details, not to approve leave -- that
+        # always goes to the student's class teacher.
+        self._can_review = session.is_faculty and session.can(Permission.REVIEW_LEAVE)
+        self._can_override = session.is_faculty and session.can(Permission.OVERRIDE_LEAVE)
         self._is_student = session.is_student
+        self._is_admin = session.is_admin
 
         self._build()
         self.refresh()
@@ -55,7 +62,10 @@ class LeaveView(ctk.CTkFrame):
         header = PageHeader(
             self, title="Leave Management",
             subtitle=("Apply for leave and track your applications" if self._is_student
-                      else "Review, approve and manage student leave applications"),
+                      else "Review and approve leave for the classes you teach"
+                      if self._can_review
+                      else "View leave records and their details. Approval is "
+                           "handled by each student's class teacher."),
             icon="⎙")
         header.pack(fill="x", padx=18, pady=(14, 10))
 

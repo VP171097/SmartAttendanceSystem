@@ -93,6 +93,7 @@ DEFAULT_CONFIG: dict = {
     "college_website": "www.gpcollege.ac.in",
     "principal_name": "Dr. R. K. Sharma",
     "affiliation": "Affiliated to State Board of Technical Education",
+    "college_established": "",         # founding year, shown in About/reports
     "logo_path": str(LOGO_PATH),
 
     # ---- Academic policy --------------------------------------------------
