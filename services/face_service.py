@@ -396,6 +396,102 @@ def _decode_blob(blob: str):
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
+def find_duplicate_matches(student_id: int, dataset_dir: str | Path,
+                           min_confidence: float | None = None) -> list[dict]:
+    """Check a freshly captured dataset against every *other* registered student.
+
+    Two students sharing the same face is either the same person registered
+    twice by mistake, or a mix-up between similar-looking siblings/photos --
+    both worth a human glancing at before the dataset is saved.  Called before
+    :func:`train_student` writes anything, so a cancelled registration leaves
+    no trace.
+
+    Returns a list of ``{student_id, full_name, enrollment_no, confidence}``
+    for every other student whose stored face scores above the confidence
+    floor, best match first.
+    """
+    dataset_dir = Path(dataset_dir)
+    images = sorted(dataset_dir.glob("image*.jpg"))
+    if not images:
+        return []
+
+    threshold = (min_confidence if min_confidence is not None
+                else float(config.get("face_min_confidence", 55.0)))
+    db = get_db()
+
+    others = db.fetch_all(
+        """SELECT s.student_id, s.full_name, s.enrollment_no,
+                  fe.encoding_blob, fe.backend
+           FROM students s JOIN face_encodings fe ON fe.student_id = s.student_id
+           WHERE s.student_id != ? AND fe.backend = ?""",
+        (student_id, ACTIVE_BACKEND or ""))
+    if not others:
+        return []
+
+    matches: dict[int, float] = {}
+
+    if _HAS_DLIB:
+        candidates = []
+        for other in others:
+            try:
+                candidates.append((other, _decode_blob(other["encoding_blob"])))
+            except Exception:                   # noqa: BLE001
+                continue
+        if not candidates:
+            return []
+
+        tolerance = float(config.get("face_tolerance", 0.45))
+        matrix = np.array([enc for _, enc in candidates])
+
+        # Sample a handful of images rather than every one -- this only needs
+        # to catch an obvious duplicate, not re-run the full training pass.
+        for image_path in images[::max(1, len(images) // 8)]:
+            image = face_recognition.load_image_file(str(image_path))
+            found = face_recognition.face_encodings(image)
+            if not found:
+                continue
+            distances = np.linalg.norm(matrix - found[0], axis=1)
+            best = int(np.argmin(distances))
+            distance = float(distances[best])
+            confidence = max(0.0, min(100.0, (1.0 - distance / (tolerance * 2)) * 100))
+            if distance <= tolerance and confidence >= threshold:
+                other = candidates[best][0]
+                matches[other["student_id"]] = max(
+                    matches.get(other["student_id"], 0.0), confidence)
+
+    elif _HAS_LBPH and LBPH_MODEL_PATH.exists() and LABEL_MAP_PATH.exists():
+        try:
+            recogniser = cv2.face.LBPHFaceRecognizer_create()
+            recogniser.read(str(LBPH_MODEL_PATH))
+            with open(LABEL_MAP_PATH, "rb") as fh:
+                label_map = pickle.load(fh)
+        except Exception:                       # noqa: BLE001
+            return []
+
+        by_id = {o["student_id"]: o for o in others}
+        for image_path in images[::max(1, len(images) // 8)]:
+            image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+            if image is None:
+                continue
+            if image.shape[:2] != (200, 200):
+                image = cv2.resize(image, (200, 200))
+            try:
+                label, distance = recogniser.predict(image)
+            except cv2.error:
+                continue
+            confidence = max(0.0, min(100.0, 100.0 - (distance * 0.65)))
+            matched_id = label_map.get(label)
+            if matched_id in by_id and confidence >= threshold:
+                matches[matched_id] = max(matches.get(matched_id, 0.0), confidence)
+
+    return sorted(
+        [{"student_id": sid, "full_name": by["full_name"],
+          "enrollment_no": by["enrollment_no"], "confidence": round(conf, 1)}
+         for sid, conf in matches.items()
+         for by in [next(o for o in others if o["student_id"] == sid)]],
+        key=lambda m: m["confidence"], reverse=True)
+
+
 def train_student(student_id: int, dataset_dir: str | Path) -> tuple[bool, str, int]:
     """Compute and store the recognition data for one student.
 

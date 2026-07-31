@@ -419,14 +419,20 @@ def delete_batch(batch_id: int, user: dict | None = None) -> tuple[bool, str]:
 # ===========================================================================
 def get_class_teacher(branch_id: int, semester_id: int,
                       section_id: int | None = None):
-    """Resolve who is responsible for a class.
+    """Resolve the class teacher for a class -- and only the class teacher.
 
-    Falls back sensibly so a student is never told "pending with nobody":
+    Deliberately **strict**, with no fallback to "whoever teaches a subject
+    here" or "the HOD": leave routing and visibility are built directly on
+    top of this, and a fallback that guesses a faculty member would let that
+    faculty see and act on leave they have no real responsibility for. If a
+    class has no class teacher assigned, this returns ``None`` and the caller
+    is expected to say so rather than pick someone.
 
-    1. An explicitly assigned class teacher for that exact class.
-    2. A class teacher assigned to the branch + semester with no section.
-    3. The faculty teaching the most subjects to that class.
-    4. The head of department.
+    Checks, in order:
+
+    1. An explicitly assigned class teacher for that exact section.
+    2. A class teacher assigned to the branch + semester with no section
+       (covers classes that have no sections at all).
     """
     db = get_db()
 
@@ -440,30 +446,12 @@ def get_class_teacher(branch_id: int, semester_id: int,
     if row:
         return row
 
-    row = db.fetch_one(
+    return db.fetch_one(
         """SELECT f.faculty_id, f.full_name, f.faculty_code, f.email, f.mobile,
                   'Class Teacher' AS source
            FROM class_teachers ct JOIN faculty f ON f.faculty_id = ct.faculty_id
            WHERE ct.branch_id = ? AND ct.semester_id = ? AND ct.section_id IS NULL
            LIMIT 1""", (branch_id, semester_id))
-    if row:
-        return row
-
-    row = db.fetch_one(
-        """SELECT f.faculty_id, f.full_name, f.faculty_code, f.email, f.mobile,
-                  'Subject Teacher' AS source
-           FROM subjects s JOIN faculty f ON f.faculty_id = s.faculty_id
-           WHERE s.branch_id = ? AND s.semester_id = ? AND s.is_active = 1
-           GROUP BY f.faculty_id
-           ORDER BY COUNT(*) DESC LIMIT 1""", (branch_id, semester_id))
-    if row:
-        return row
-
-    return db.fetch_one(
-        """SELECT f.faculty_id, f.full_name, f.faculty_code, f.email, f.mobile,
-                  'Head of Department' AS source
-           FROM faculty f WHERE f.branch_id = ? AND f.status = 'Active'
-           ORDER BY f.experience_years DESC LIMIT 1""", (branch_id,))
 
 
 def get_class_teachers() -> list:

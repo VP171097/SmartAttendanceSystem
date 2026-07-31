@@ -70,10 +70,17 @@ NAV_ITEMS = [
     NavItem("dashboard", "Dashboard", "▤", "ui.views.dashboard", "DashboardView",
             Permission.VIEW_DASHBOARD, group="Main"),
 
+    # Taking attendance -- by camera, by hand, or verifying a student's own
+    # self-mark -- is a class-teaching activity, deliberately restricted to
+    # Faculty.  An administrator manages the institution, not the classroom;
+    # keeping them out of this queue also means self-marked attendance can
+    # never be approved by anyone who isn't actually teaching that class.
     NavItem("attendance_face", "Take Attendance", "◉", "ui.views.attendance_face",
-            "FaceAttendanceView", Permission.TAKE_ATTENDANCE, group="Attendance"),
+            "FaceAttendanceView", Permission.TAKE_ATTENDANCE,
+            roles=(ROLE_FACULTY,), group="Attendance"),
     NavItem("attendance_manual", "Manual Attendance", "✓", "ui.views.attendance_manual",
-            "ManualAttendanceView", Permission.EDIT_ATTENDANCE, group="Attendance"),
+            "ManualAttendanceView", Permission.EDIT_ATTENDANCE,
+            roles=(ROLE_FACULTY,), group="Attendance"),
     # Students raise self-attendance here; faculty verify it here.  Both halves
     # live in one view because they are two sides of the same workflow.
     NavItem("self_attendance", "Mark My Attendance", "✓", "ui.views.self_attendance",
@@ -81,7 +88,7 @@ NAV_ITEMS = [
             roles=(ROLE_STUDENT,), group="Attendance"),
     NavItem("verify_attendance", "Verify Attendance", "⚖", "ui.views.self_attendance",
             "SelfAttendanceView", Permission.VERIFY_SELF_ATTENDANCE,
-            roles=(ROLE_ADMIN, ROLE_FACULTY), group="Attendance"),
+            roles=(ROLE_FACULTY,), group="Attendance"),
     NavItem("attendance_records", "Attendance Records", "≡", "ui.views.attendance_records",
             "AttendanceRecordsView", Permission.VIEW_REPORTS, group="Attendance"),
 

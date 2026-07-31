@@ -72,6 +72,10 @@ STATUS_COLORS = {
     "Late":          SEMANTIC["warning"],
     "Leave":         SEMANTIC["info"],
     "Medical Leave": SEMANTIC["purple"],
+    # Self-marked attendance awaiting a faculty decision -- not a real
+    # attendance status, but shown alongside them in a student's own view so
+    # a pending mark never reads as a plain, unexplained Absent.
+    "Pending Approval": SEMANTIC["warning"],
 }
 
 LEAVE_STATUS_COLORS = {
