@@ -235,8 +235,22 @@ def delete_session(att_session_id: int, reason: str,
 
 def search_sessions(subject_id=None, faculty_id=None, branch_id=None, semester_id=None,
                     section_id=None, from_date=None, to_date=None,
-                    locked_only: bool = False, limit: int = 300) -> list:
+                    locked_only: bool = False, limit: int = 300,
+                    enforce_scope: bool = True) -> list:
+    """Conducted class sessions, restricted to what the caller may see.
+
+    A student sees only sessions they were on the roster for; a lecturer only
+    sessions for their own subjects.
+    """
     clauses, params = ["1=1"], []
+
+    if enforce_scope:
+        from core.scope import current_scope
+        clause, scope_params = current_scope().session_clause(
+            subject_col="a.subject_id", faculty_col="a.faculty_id",
+            session_id_col="a.att_session_id")
+        clauses.append(clause)
+        params.extend(scope_params)
 
     for column, value in (("a.subject_id", subject_id), ("a.faculty_id", faculty_id),
                           ("a.branch_id", branch_id), ("a.semester_id", semester_id),
@@ -594,6 +608,13 @@ def get_defaulters(threshold: float | None = None, branch_id=None, semester_id=N
     threshold = threshold if threshold is not None else float(config.get("attendance_threshold", 75.0))
 
     clauses, params = ["s.status = 'Active'"], []
+    # Row-level restriction for the signed-in user (see core/scope.py).
+    from core.scope import current_scope
+    _scope_clause, _scope_params = current_scope().attendance_clause(
+        student_col="s.student_id", subject_col="a.subject_id")
+    clauses.append(_scope_clause)
+    params.extend(_scope_params)
+
     if branch_id:
         clauses.append("s.branch_id = ?")
         params.append(branch_id)
@@ -657,9 +678,23 @@ def check_eligibility(student_id: int, threshold: float | None = None) -> dict:
 def get_attendance_records(from_date=None, to_date=None, branch_id=None, semester_id=None,
                            section_id=None, subject_id=None, faculty_id=None,
                            student_id=None, status=None, session_id=None,
-                           search: str = "", limit: int = 5000) -> list:
-    """The general-purpose query behind every report and the search screen."""
+                           search: str = "", limit: int = 5000,
+                           enforce_scope: bool = True) -> list:
+    """The general-purpose query behind every report and the search screen.
+
+    Args:
+        enforce_scope: apply the signed-in user's row-level restriction. A
+            student therefore sees only their own rows and a lecturer only
+            their own subjects, whatever filters the caller passes. Set False
+            only for administrative jobs that legitimately span everyone.
+    """
     clauses, params = ["1=1"], []
+
+    if enforce_scope:
+        from core.scope import current_scope
+        clause, scope_params = current_scope().attendance_clause()
+        clauses.append(clause)
+        params.extend(scope_params)
 
     filters = [
         ("class_date >= ?", from_date), ("class_date <= ?", to_date),
@@ -687,6 +722,13 @@ def get_daily_series(from_date: str, to_date: str, branch_id=None,
                      semester_id=None, subject_id=None) -> list:
     """Daily attendance percentage over a range -- the trend chart source."""
     clauses, params = ["a.class_date BETWEEN ? AND ?"], [from_date, to_date]
+    # Row-level restriction for the signed-in user (see core/scope.py).
+    from core.scope import current_scope
+    _scope_clause, _scope_params = current_scope().attendance_clause(
+        student_col="a.student_id", subject_col="a.subject_id")
+    clauses.append(_scope_clause)
+    params.extend(_scope_params)
+
     if branch_id:
         clauses.append("ats.branch_id = ?")
         params.append(branch_id)
@@ -712,6 +754,13 @@ def get_daily_series(from_date: str, to_date: str, branch_id=None,
 
 def get_monthly_series(year: int, branch_id=None, semester_id=None) -> list:
     clauses, params = ["strftime('%Y', a.class_date) = ?"], [str(year)]
+    # Row-level restriction for the signed-in user (core/scope.py).
+    from core.scope import current_scope
+    _sc, _sp = current_scope().attendance_clause(
+        student_col="a.student_id", subject_col="a.subject_id")
+    clauses.append(_sc)
+    params.extend(_sp)
+
     if branch_id:
         clauses.append("ats.branch_id = ?")
         params.append(branch_id)
@@ -748,6 +797,17 @@ def get_comparison(group_by: str, from_date=None, to_date=None) -> list:
     label_column, join = columns[group_by]
 
     clauses, params = ["1=1"], []
+
+    # Comparison charts are the easiest place to leak another lecturer's
+    # figures, so the row restriction is applied here rather than left to the
+    # analytics screen.  A faculty comparing "faculty" therefore sees a chart
+    # containing only themselves, which is the correct answer for them.
+    from core.scope import current_scope
+    _sc, _sp = current_scope().attendance_clause(
+        student_col="a.student_id", subject_col="a.subject_id")
+    clauses.append(_sc)
+    params.extend(_sp)
+
     if from_date:
         clauses.append("a.class_date >= ?")
         params.append(from_date)
@@ -771,6 +831,13 @@ def get_comparison(group_by: str, from_date=None, to_date=None) -> list:
 def get_status_distribution(from_date=None, to_date=None, branch_id=None) -> dict:
     """``{status: count}`` for the dashboard donut chart."""
     clauses, params = ["1=1"], []
+    # Row-level restriction for the signed-in user (core/scope.py).
+    from core.scope import current_scope
+    _sc, _sp = current_scope().attendance_clause(
+        student_col="a.student_id", subject_col="a.subject_id")
+    clauses.append(_sc)
+    params.extend(_sp)
+
     if from_date:
         clauses.append("a.class_date >= ?")
         params.append(from_date)

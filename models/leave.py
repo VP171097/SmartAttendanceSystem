@@ -98,13 +98,19 @@ def search_leaves(student_id=None, status=None, leave_type=None, branch_id=None,
         clauses.append("l.from_date <= ?")
         params.append(to_date)
 
-    # Faculty only see leave from students in classes they actually teach.
+    # Faculty see leave only for classes where they are the assigned class
+    # teacher -- not merely "teaches a subject to this class", which used to
+    # let every subject teacher see (and act on) leave that was never routed
+    # to them.  Mirrors the same rule as get_pending_with / get_class_teacher.
     if faculty_id:
         clauses.append(
-            """EXISTS (SELECT 1 FROM subjects sub
-                       WHERE sub.faculty_id = ?
-                         AND sub.branch_id = s.branch_id
-                         AND sub.semester_id = s.semester_id)""")
+            """EXISTS (SELECT 1 FROM class_teachers ct
+                       WHERE ct.faculty_id = ?
+                         AND ct.branch_id = s.branch_id
+                         AND ct.semester_id = s.semester_id
+                         AND (ct.section_id = s.section_id
+                              OR (ct.section_id IS NULL AND s.section_id IS NULL)
+                              OR ct.section_id IS NULL))""")
         params.append(faculty_id)
 
     if search:
@@ -118,14 +124,24 @@ def search_leaves(student_id=None, status=None, leave_type=None, branch_id=None,
 
 
 def count_pending(faculty_id: int | None = None) -> int:
+    """Pending-leave badge count.
+
+    Scoped to leave the caller is the assigned class teacher for -- see the
+    note on :func:`search_leaves` about why "teaches a subject here" is not
+    the right test.
+    """
     if faculty_id:
         return int(get_db().fetch_value(
             """SELECT COUNT(*) FROM leave_applications l
                JOIN students s ON s.student_id = l.student_id
                WHERE l.status = 'Pending' AND EXISTS (
-                   SELECT 1 FROM subjects sub WHERE sub.faculty_id = ?
-                     AND sub.branch_id = s.branch_id
-                     AND sub.semester_id = s.semester_id)""", (faculty_id,), 0))
+                   SELECT 1 FROM class_teachers ct
+                   WHERE ct.faculty_id = ?
+                     AND ct.branch_id = s.branch_id
+                     AND ct.semester_id = s.semester_id
+                     AND (ct.section_id = s.section_id
+                          OR (ct.section_id IS NULL AND s.section_id IS NULL)
+                          OR ct.section_id IS NULL))""", (faculty_id,), 0))
     return get_db().count("leave_applications", "status = 'Pending'")
 
 
@@ -279,6 +295,12 @@ def review_leave(leave_id: int, decision: str, remarks: str = "",
     """Faculty decision: Approve, Reject, or Return for Correction.
 
     Approving pushes the leave into attendance for the covered dates.
+
+    ``user`` with role Faculty is checked against the actual class-teacher
+    routing before anything is written -- the screen already filters the
+    queue to a faculty's own classes, but this is the enforcement that
+    matters, since a queue filter alone would not stop a request built by
+    hand against a leave_id that was never routed to that faculty.
     """
     db = get_db()
     leave = get_leave(leave_id)
@@ -286,6 +308,12 @@ def review_leave(leave_id: int, decision: str, remarks: str = "",
         return False, "Leave application not found."
     if leave["status"] == LEAVE_APPROVED and decision == LEAVE_APPROVED:
         return False, "This application is already approved."
+
+    if (user or {}).get("role") == "Faculty":
+        routing = get_pending_with(leave)
+        if routing.get("faculty_id") != (user or {}).get("linked_id"):
+            return False, ("You are not the class teacher for this student, "
+                           "so you cannot review this application.")
 
     if decision in (LEAVE_REJECTED, LEAVE_RETURNED) and not remarks.strip():
         return False, f"Please give a reason when choosing '{decision}'."
@@ -305,7 +333,17 @@ def review_leave(leave_id: int, decision: str, remarks: str = "",
                                       leave["to_date"], status, leave_id, user)
         db.update("leave_applications", {"attendance_applied": 1},
                   "leave_id = ?", (leave_id,))
-        message += f" {affected} attendance record(s) updated to '{status}'."
+        # `affected` counts individual class *periods*, not calendar days -- a
+        # student typically has several classes a day, so an 8-day leave over
+        # a full timetable can easily touch 30+ records. Spell that out so the
+        # number doesn't read as a bug.
+        if affected:
+            message += (f" {affected} scheduled class period(s) across "
+                       f"{leave['total_days']} day(s) ({leave['from_date']} to "
+                       f"{leave['to_date']}) marked '{status}'.")
+        else:
+            message += (" No scheduled class periods were found in that range "
+                       "to update (none had been opened for attendance yet).")
 
     log_audit(user, ACTION_LEAVE_REVIEW, "Leave", "leave_applications", leave_id,
               old_value={"status": leave["status"]},
@@ -411,10 +449,13 @@ def get_leave_history(student_id: int) -> list:
 def get_pending_with(leave) -> dict:
     """Resolve who is expected to act on an application next.
 
-    A student should never have to guess whose desk their application is on,
-    so this always returns a name: the class teacher for their class, falling
-    back through subject teacher and HOD (see
-    :func:`models.academic.get_class_teacher`).
+    Routes to the class teacher for the student's class -- and only the class
+    teacher (see :func:`models.academic.get_class_teacher`).  There is
+    deliberately no fallback to "whoever teaches a subject here": that would
+    let a faculty member see and approve leave for a class they are not
+    actually responsible for, which is the entire point of routing leave in
+    the first place.  Approval never falls through to the administrator, who
+    can only view records.
     """
     status = leave["status"] if "status" in leave.keys() else leave.get("status")
 
@@ -438,8 +479,10 @@ def get_pending_with(leave) -> dict:
                                 student["section_id"])
 
     if teacher is None:
-        return {"name": "Administrator", "role": "Admin",
-                "note": "No class teacher assigned - an administrator will review"}
+        return {"name": "No class teacher assigned", "role": "",
+                "note": ("This class has no class teacher assigned yet. Ask "
+                        "the administrator to assign one from Academic "
+                        "Setup -> Class Teachers before this can be reviewed.")}
 
     return {
         "name": teacher["full_name"],

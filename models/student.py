@@ -81,10 +81,21 @@ def get_student_by_enrollment(enrollment_no: str):
 
 
 def _build_filter(branch_id=None, semester_id=None, section_id=None, batch_id=None,
-                  session_id=None, status=None, search="", face_registered=None
-                  ) -> tuple[str, list]:
-    """Shared WHERE clause for the student grid and its count query."""
+                  session_id=None, status=None, search="", face_registered=None,
+                  enforce_scope: bool = True) -> tuple[str, list]:
+    """Shared WHERE clause for the student grid and its count query.
+
+    ``enforce_scope`` restricts the result to the signed-in user's reach: a
+    student sees only their own record, a lecturer only the classes they
+    teach.  Administrative jobs that must span everyone pass False.
+    """
     clauses, params = ["1=1"], []
+
+    if enforce_scope:
+        from core.scope import current_scope
+        clause, scope_params = current_scope().student_clause()
+        clauses.append(clause)
+        params.extend(scope_params)
 
     if branch_id:
         clauses.append("branch_id = ?")
@@ -118,14 +129,16 @@ def _build_filter(branch_id=None, semester_id=None, section_id=None, batch_id=No
 def search_students(branch_id=None, semester_id=None, section_id=None, batch_id=None,
                     session_id=None, status="Active", search="", face_registered=None,
                     page: int = 1, page_size: int | None = None,
-                    order_by: str = "roll_no") -> tuple[list, int]:
+                    order_by: str = "roll_no",
+                    enforce_scope: bool = True) -> tuple[list, int]:
     """Paginated student search.
 
     Returns ``(rows, total_count)`` so the grid can render page controls.
     """
     page_size = page_size or int(config.get("rows_per_page", 25))
     where, params = _build_filter(branch_id, semester_id, section_id, batch_id,
-                                  session_id, status, search, face_registered)
+                                  session_id, status, search, face_registered,
+                                  enforce_scope=enforce_scope)
 
     total = int(get_db().fetch_value(
         f"SELECT COUNT(*) FROM v_student_full WHERE {where}", params, 0))
